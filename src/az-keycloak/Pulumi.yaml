@@ -2,6 +2,11 @@ name: az-keycloak
 runtime: dotnet
 description: Setup Keycloak in Azure.
 config:
+  azure-native:location: westeurope
+  az-keycloak:name: demo
+  az-keycloak:sql.admin.user: sqladm
+  az-keycloak:sql.kc.user: kcadm
+
   pulumi:tags:
     value:
       pulumi:template: azure-csharp
