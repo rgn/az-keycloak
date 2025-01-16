@@ -85,7 +85,7 @@ internal class IamStack : Stack
         SetupSqlDbLogin(_keycloakDbUser, KeycloakDbPassword);
 
         _containerRegistry = AddContainerRegistry(_name);
-        _keycloakImage = AddKeycloakImage();
+        _keyCloakImage = AddKeycloakImage();
     }
 
     #region ResourceGroup
