@@ -6,6 +6,7 @@ config:
   az-keycloak:name: demo
   az-keycloak:sql.admin.user: sqladm
   az-keycloak:sql.kc.user: kcadm
+  az-keycloak:keycloak.image.version: 25.0.2
 
   pulumi:tags:
     value:

@@ -60,6 +60,9 @@ internal class IamStack : Stack
     // reference to the container registry
     private AzureNative.ContainerRegistry.Registry _containerRegistry = default!;
 
+    // reference to the keycloak image
+    private Pulumi.Docker.Image _keyCloakImage = default!;
+
     #endregion Resourcereferences
 
     /// <summary>
@@ -82,6 +85,7 @@ internal class IamStack : Stack
         SetupSqlDbLogin(_keycloakDbUser, KeycloakDbPassword);
 
         _containerRegistry = AddContainerRegistry(_name);
+        _keycloakImage = AddKeycloakImage();
     }
 
     #region ResourceGroup
@@ -329,6 +333,33 @@ internal class IamStack : Stack
 
     #endregion ContainerRegistry
 
+    #region KeyCloak Image
+    public Pulumi.Docker.Image AddKeycloakImage()
+    {
+        var keycloakVersion = _config.Get("keycloak.image.version") ?? "latest";
+
+        return new Pulumi.Docker.Image("image-keycloak", new()
+        {
+            ImageName = _containerRegistry.LoginServer.Apply(x => $"{x}/keycloak:{keycloakVersion}"),
+            SkipPush = false,
+            Registry = new Pulumi.Docker.Inputs.RegistryArgs
+            {
+                Server = _containerRegistry.LoginServer,
+                Username = ContainerRegistryUser,
+                Password = ContainerRegistryPassword
+            },
+            Build = new Pulumi.Docker.Inputs.DockerBuildArgs
+            {
+                Context = ".",
+                Dockerfile = "Containers/Keycloak/Dockerfile",
+                Platform = "linux/amd64",
+            }
+        }, new Pulumi.CustomResourceOptions
+        {
+            DependsOn = { _containerRegistry }
+        });
+    }
+    #endregion Keycloak Image
 
     #region Utils
     /// <summary>
