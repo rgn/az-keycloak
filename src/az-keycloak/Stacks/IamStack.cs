@@ -327,7 +327,6 @@ internal class IamStack : Stack
         return registry;
     }
 
-
     #endregion ContainerRegistry
 
 
