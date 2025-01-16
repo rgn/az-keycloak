@@ -38,6 +38,12 @@ internal class IamStack : Stack
     // will hold the sql keycloak password, after it was created.
     [Output] public Output<string> KeycloakDbPassword { get; set; } = default!;
 
+    // will hold the container registry user name
+    [Output] public Output<string> ContainerRegistryUser { get; set; } = default!;
+
+    // will hold the container registry password
+    [Output] public Output<string> ContainerRegistryPassword { get; set; } = default!;
+
     #endregion Outputs
 
     #region ResourceReferences
@@ -50,6 +56,9 @@ internal class IamStack : Stack
 
     // reference to the sql database
     private readonly AzureNative.Sql.Database _sqlDatabase = default!;
+
+    // reference to the container registry
+    private AzureNative.ContainerRegistry.Registry _containerRegistry = default!;
 
     #endregion Resourcereferences
 
@@ -70,7 +79,9 @@ internal class IamStack : Stack
             OverrideSpecial = "!#$%&*()-_=+[]{}<>:?",
         }).Result;
         
-        SetupSqlDbLogin(_keycloakDbUser, KeycloakDbPassword);        
+        SetupSqlDbLogin(_keycloakDbUser, KeycloakDbPassword);
+
+        _containerRegistry = AddContainerRegistry(_name);
     }
 
     #region ResourceGroup
@@ -245,6 +256,79 @@ internal class IamStack : Stack
         });
     }
     #endregion SqlDbUser
+
+    #region ContainerRegistry
+    /// <summary>
+    /// Create a Azure Container Registry
+    /// </summary>
+    /// <param name="name">Registry name</param>
+    /// <returns>Instance of container regitry resource</returns>
+    public AzureNative.ContainerRegistry.Registry AddContainerRegistry(string name)
+    {
+        var registry = new AzureNative.ContainerRegistry.Registry($"registry-{name}", new()
+        {
+            RegistryName = _resourceGroup.Location.Apply(x => $"cr{name.Replace("-", "")}{x}1"),
+            ResourceGroupName = _resourceGroup.Name,
+            Location = _resourceGroup.Location,
+            AdminUserEnabled = true,
+            DataEndpointEnabled = false,
+            Encryption = new AzureNative.ContainerRegistry.Inputs.EncryptionPropertyArgs
+            {
+                // we won't encrypt this registry because it's a demo and I want to cut costs
+                Status = AzureNative.ContainerRegistry.EncryptionStatus.Disabled,
+            },
+            // Azure Services are allowed to connect to this registry
+            NetworkRuleBypassOptions = AzureNative.ContainerRegistry.NetworkRuleBypassOptions.AzureServices,
+            Policies = new AzureNative.ContainerRegistry.Inputs.PoliciesArgs
+            {
+                ExportPolicy = new AzureNative.ContainerRegistry.Inputs.ExportPolicyArgs
+                {
+                    // we want to be able to export
+                    Status = AzureNative.ContainerRegistry.ExportPolicyStatus.Enabled,
+                },
+                QuarantinePolicy = new AzureNative.ContainerRegistry.Inputs.QuarantinePolicyArgs
+                {
+                    // we don't want to have a quarantain policy
+                    Status = AzureNative.ContainerRegistry.PolicyStatus.Disabled,
+                },
+                RetentionPolicy = new AzureNative.ContainerRegistry.Inputs.RetentionPolicyArgs
+                {
+                    Days = 7,
+                    Status = AzureNative.ContainerRegistry.PolicyStatus.Disabled,
+                },
+                TrustPolicy = new AzureNative.ContainerRegistry.Inputs.TrustPolicyArgs
+                {
+                    // we don't have trust issues for this demo
+                    Status = AzureNative.ContainerRegistry.PolicyStatus.Disabled,
+                    Type = AzureNative.ContainerRegistry.TrustPolicyType.Notary,
+                },
+            },
+            Sku = new AzureNative.ContainerRegistry.Inputs.SkuArgs
+            {
+                // as it's a demo i want to cut costs
+                Name = AzureNative.ContainerRegistry.SkuName.Basic,                
+            },
+            // public access, due to basic tier
+            PublicNetworkAccess = AzureNative.ContainerRegistry.PublicNetworkAccess.Enabled,
+            // we don't require zone redundancy for this demo
+            ZoneRedundancy = AzureNative.ContainerRegistry.ZoneRedundancy.Disabled,
+        });
+
+        // retrieve the automatically generated credentials from Azure
+        var credentials = AzureNative.ContainerRegistry.ListRegistryCredentials.Invoke(new()
+        {
+            ResourceGroupName = _resourceGroup.Name,
+            RegistryName = registry.Name,
+        });
+        
+        ContainerRegistryUser = credentials.Apply(result => result.Username!);
+        ContainerRegistryPassword = credentials.Apply(result => result.Passwords[0]!.Value!);
+
+        return registry;
+    }
+
+
+    #endregion ContainerRegistry
 
 
     #region Utils
