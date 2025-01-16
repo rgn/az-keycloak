@@ -44,6 +44,9 @@ internal class IamStack : Stack
     // will hold the container registry password
     [Output] public Output<string> ContainerRegistryPassword { get; set; } = default!;
 
+    // will hold the keycloak admin password
+    [Output] public Output<string> KeycloakAdminPassword { get; set; } = default!;
+
     #endregion Outputs
 
     #region ResourceReferences
@@ -86,6 +89,7 @@ internal class IamStack : Stack
 
         _containerRegistry = AddContainerRegistry(_name);
         _keyCloakImage = AddKeycloakImage();
+        CreateContainerApp(_name);
     }
 
     #region ResourceGroup
@@ -360,6 +364,248 @@ internal class IamStack : Stack
         });
     }
     #endregion Keycloak Image
+
+    #region ConatinerApp
+    public AzureNative.App.ContainerApp CreateContainerApp(string name)
+    {
+        var keycloakAdminUser = _config.Get("keycloak.admin.usr") ?? "kcadm";
+
+        KeycloakAdminPassword = new Random.RandomPassword($"password-keycloak-admin-{name}", new()
+        {
+            Length = 18,
+            Special = true,
+            OverrideSpecial = "!#$%&*()-_=+[]{}<>:?",
+        }).Result;
+
+        var analyticsWorkspace = new AzureNative.OperationalInsights.Workspace($"analytics-workspace-{name}", new()
+        {
+            WorkspaceName = $"analyticsworkspace-{name}",
+            ResourceGroupName = _resourceGroup.Name,
+            Location = _resourceGroup.Location,
+            PublicNetworkAccessForIngestion = AzureNative.OperationalInsights.PublicNetworkAccessType.Enabled,
+            PublicNetworkAccessForQuery = AzureNative.OperationalInsights.PublicNetworkAccessType.Enabled,
+            RetentionInDays = 30,
+            Features = new AzureNative.OperationalInsights.Inputs.WorkspaceFeaturesArgs
+            {
+                EnableLogAccessUsingOnlyResourcePermissions = true,
+            },
+            Sku = new AzureNative.OperationalInsights.Inputs.WorkspaceSkuArgs
+            {
+                Name = AzureNative.OperationalInsights.WorkspaceSkuNameEnum.PerGB2018,
+            },
+            WorkspaceCapping = new AzureNative.OperationalInsights.Inputs.WorkspaceCappingArgs
+            {
+                DailyQuotaGb = -1,
+            }
+        });
+
+        var workspaceSharedKeys = Output.Tuple(_resourceGroup.Name, analyticsWorkspace.Name).Apply(items =>
+            AzureNative.OperationalInsights.GetSharedKeys.Invoke(
+                new AzureNative.OperationalInsights.GetSharedKeysInvokeArgs
+                {
+                    ResourceGroupName = items.Item1,
+                    WorkspaceName = items.Item2
+                }
+        ));
+
+        var managedEnvironment = new AzureNative.App.ManagedEnvironment($"managed-environment-{name}", new()
+        {
+            EnvironmentName = $"managed-environment-{name}",
+            Location = _resourceGroup.Location,
+            ResourceGroupName = _resourceGroup.Name,
+            ZoneRedundant = false,
+            AppLogsConfiguration = new AzureNative.App.Inputs.AppLogsConfigurationArgs
+            {
+                Destination = "log-analytics",
+                LogAnalyticsConfiguration = new AzureNative.App.Inputs.LogAnalyticsConfigurationArgs
+                {
+                    CustomerId = analyticsWorkspace.CustomerId,
+                    SharedKey = workspaceSharedKeys.Apply(result => result.PrimarySharedKey ?? string.Empty)
+                }
+            }
+        },  new CustomResourceOptions
+        {
+            DependsOn = { analyticsWorkspace }
+        });
+
+        var credentials = Output.Tuple(_resourceGroup.Name, _containerRegistry.Name).Apply(names =>
+            AzureNative.ContainerRegistry.ListRegistryCredentials.InvokeAsync(new AzureNative.ContainerRegistry.ListRegistryCredentialsArgs
+            {
+                ResourceGroupName = names.Item1,
+                RegistryName = names.Item2
+            }));
+
+        var registryUsername = credentials.Apply(c => c.Username);
+        var registryPassword = credentials.Apply(c => c.Passwords[0].Value);
+
+        var containerApp = new AzureNative.App.ContainerApp($"container-app-{name}", new()
+        {
+            ContainerAppName = name,            
+            ResourceGroupName = _resourceGroup.Name,
+            Location = _resourceGroup.Location,
+            EnvironmentId = managedEnvironment.Id,
+            Configuration = new AzureNative.App.Inputs.ConfigurationArgs
+            {
+                ActiveRevisionsMode = AzureNative.App.ActiveRevisionsMode.Single,
+                // https://github.com/pulumi/pulumi-azure-native/issues/3312
+                //Ingress = new Pulumi.AzureNative.App.V20240301.Inputs.IngressArgs//new AzureNative.App.Inputs.IngressArgs
+                Ingress = new AzureNative.App.Inputs.IngressArgs
+                {
+                    AllowInsecure = true,
+                    ExposedPort = 0,
+                    External = true,
+                    // disable as we will have only on container instance running, add that if you have multiple
+                    // otherwise you will run into issues!
+                    // StickySessions = new AzureNative.App.V20240301.Inputs.IngressStickySessionsArgs
+                    // {
+                    //     Affinity = "sticky"
+                    // },
+                    TargetPort = 8080,
+                    Traffic = new[]
+                    {
+                        new AzureNative.App.Inputs.TrafficWeightArgs
+                        {
+                            LatestRevision = true,
+                            Weight = 100,
+                        },
+                    },
+                    Transport = "Auto",
+                },
+                MaxInactiveRevisions = 100,
+                Registries = new[]
+                {
+                    new AzureNative.App.Inputs.RegistryCredentialsArgs // TODO: add key vault!
+                    {
+                        Server = _containerRegistry.LoginServer,
+                        Username = _containerRegistry.Name,
+                        PasswordSecretRef = "registry-password",
+                    },
+                },
+                Secrets = new[]
+                {
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "registry-password",
+                        Value = ContainerRegistryPassword
+                    },
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "keycloak-admin",
+                        Value = keycloakAdminUser
+                    },
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "keycloak-admin-password",
+                        Value = KeycloakAdminPassword
+                    },
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "kc-db-username",
+                        Value = _keycloakDbUser
+                    },
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "kc-db-password",
+                        Value = KeycloakDbPassword
+                    },
+                    new AzureNative.App.Inputs.SecretArgs
+                    {
+                        Name = "kc-db-url",
+                        // TODO: retrieve the database name dynamically!
+                        Value = _sqlServer.Name.Apply(x => $"jdbc:sqlserver://{x}.database.windows.net:1433;database=keycloak;trustServerCertificate=true;encrypt=true;trustServerCertificate=true;hostNameInCertificate=*.database.windows.net;loginTimeout=30;"),
+                    }
+                },
+            },
+            Identity = new AzureNative.App.Inputs.ManagedServiceIdentityArgs
+            {
+                Type = AzureNative.App.ManagedServiceIdentityType.None,
+            },
+            Template = new AzureNative.App.Inputs.TemplateArgs
+            {
+                Containers = new[]
+                {
+                    new AzureNative.App.Inputs.ContainerArgs
+                    {
+                        Command = new[]
+                        {
+                            "/opt/keycloak/bin/kc.sh",
+                            "start",
+                            "--optimized", // we have a pre-build image, so we can directly start
+                            "--hostname-strict=false", // we don't now the dynamically generated hostname at this point
+                        },
+                        Env = new[]
+                        {
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_HEALTH_ENABLED",
+                                Value = "true",
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_METRICS_ENABLED",
+                                Value = "true",
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_PROXY_HEADERS",
+                                Value = "xforwarded",
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_HTTP_ENABLED",
+                                Value = "true",
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KEYCLOAK_ADMIN",
+                                SecretRef = "keycloak-admin"
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KEYCLOAK_ADMIN_PASSWORD",
+                                SecretRef = "keycloak-admin-password",
+                            },                            
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_DB_URL",
+                                SecretRef = "kc-db-url"
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_DB_USERNAME",
+                                SecretRef = "kc-db-username"
+                            },
+                            new AzureNative.App.Inputs.EnvironmentVarArgs
+                            {
+                                Name = "KC_DB_PASSWORD",
+                                SecretRef = "kc-db-password"
+                            }                            
+                        },
+                        Image = _keyCloakImage.ImageName.Apply(x => $"{x}"), // registry.LoginServer.Apply(x => $"{x}/keycloak/:{version}")
+                        Name = "keycloak",
+                        Resources = new AzureNative.App.Inputs.ContainerResourcesArgs
+                        {
+                            // again low resource, for production you might want to have a better performance
+                            Cpu = 0.25,
+                            Memory = "0.5Gi",
+                        },
+                    },
+                },
+                RevisionSuffix = "",
+                Scale = new AzureNative.App.Inputs.ScaleArgs
+                {                    
+                    MinReplicas = 0, // we want to have a single instance without any replica
+                    MaxReplicas = 0
+                }
+            },
+        },  new CustomResourceOptions
+        {
+            DependsOn = { _containerRegistry, _keyCloakImage, managedEnvironment, _sqlDatabase }
+        });
+
+        return containerApp;
+    }    
+    #endregion ContaienrApp
 
     #region Utils
     /// <summary>
