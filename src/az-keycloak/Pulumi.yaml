@@ -3,7 +3,7 @@ runtime: dotnet
 description: Setup Keycloak in Azure.
 config:
   azure-native:location: westeurope
-  az-keycloak:name: demo
+  az-keycloak:name: demo3
   az-keycloak:sql.admin.user: sqladm
   az-keycloak:sql.kc.user: kcadm
   az-keycloak:keycloak.image.version: 25.0.2

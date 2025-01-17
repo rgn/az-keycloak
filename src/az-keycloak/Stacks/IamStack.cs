@@ -46,6 +46,9 @@ internal class IamStack : Stack
 
     // will hold the keycloak admin password
     [Output] public Output<string> KeycloakAdminPassword { get; set; } = default!;
+    
+    // will hold the keycloak https uri
+    [Output] public Output<string> KeycloakUri { get; set; } = default!;
 
     #endregion Outputs
 
@@ -142,7 +145,7 @@ internal class IamStack : Stack
         });
 
         // Allow connection to SQL Server from other Azure Services, wait fore sqlServer to be ready
-        var azureFirewallRule = new AzureNative.Sql.FirewallRule("fw-rule-public", new()
+        var azureFirewallRule = new AzureNative.Sql.FirewallRule($"fw-rule-public-{name}", new()
         {
             FirewallRuleName = "allowAllWindowsAzureIps",
             ResourceGroupName = _resourceGroup.Name,
@@ -156,7 +159,7 @@ internal class IamStack : Stack
 
         // Allow connection to SQL Server via internet for the current IP
         var myIp = GetPublicIp().GetAwaiter().GetResult();
-        var myFirewallRule = new AzureNative.Sql.FirewallRule("fw-rule-my-ip", new()
+        var myFirewallRule = new AzureNative.Sql.FirewallRule($"fw-rule-my-ip-{name}", new()
         {
             FirewallRuleName = "allowMyIp",
             ResourceGroupName = _resourceGroup.Name,
@@ -279,7 +282,7 @@ internal class IamStack : Stack
             ResourceGroupName = _resourceGroup.Name,
             Location = _resourceGroup.Location,
             AdminUserEnabled = true,
-            DataEndpointEnabled = false,
+            DataEndpointEnabled = false,            
             Encryption = new AzureNative.ContainerRegistry.Inputs.EncryptionPropertyArgs
             {
                 // we won't encrypt this registry because it's a demo and I want to cut costs
@@ -320,6 +323,9 @@ internal class IamStack : Stack
             PublicNetworkAccess = AzureNative.ContainerRegistry.PublicNetworkAccess.Enabled,
             // we don't require zone redundancy for this demo
             ZoneRedundancy = AzureNative.ContainerRegistry.ZoneRedundancy.Disabled,
+        }, new()
+        {
+            AdditionalSecretOutputs = { "Passwords" }
         });
 
         // retrieve the automatically generated credentials from Azure
@@ -330,7 +336,7 @@ internal class IamStack : Stack
         });
         
         ContainerRegistryUser = credentials.Apply(result => result.Username!);
-        ContainerRegistryPassword = credentials.Apply(result => result.Passwords[0]!.Value!);
+        ContainerRegistryPassword = credentials.Apply(result => result.Passwords[0]!.Value!).Apply(Output.CreateSecret);
 
         return registry;
     }
@@ -595,13 +601,15 @@ internal class IamStack : Stack
                 Scale = new AzureNative.App.Inputs.ScaleArgs
                 {                    
                     MinReplicas = 0, // we want to have a single instance without any replica
-                    MaxReplicas = 0
+                    MaxReplicas = 1
                 }
             },
         },  new CustomResourceOptions
         {
             DependsOn = { _containerRegistry, _keyCloakImage, managedEnvironment, _sqlDatabase }
         });
+
+        KeycloakUri = containerApp.LatestRevisionFqdn.Apply(fqdn => $"https://{fqdn}");
 
         return containerApp;
     }    
